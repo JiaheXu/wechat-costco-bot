@@ -1,0 +1,10 @@
+captures/
+__pycache__/
+*.pcap
+*.pcapng
+.venv/
+.mitmproxy/
+images/
+logs/
+state/
+.tools/
