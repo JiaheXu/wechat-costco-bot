@@ -11,9 +11,13 @@ or mitmproxy process is needed for direct fetching. Starting the login bridge
 requires sudo if the login bridge needs starting. Each run creates a new Costco
 login session and requests a fresh QR, then saves a uniquely named PNG under
 `images/` beside the script. Image files have owner-only permissions and are
-excluded from Git. A 10-pixel white border is added on all four sides without
-resizing the QR: a 400×400 image becomes 420×420. Telegram sends this same padded
-image. WeChat can stay running in the background.
+excluded from Git. When `background.png` exists beside the script, each fresh
+QR is placed in that membership-card background at 472×922 pixels, with a white
+border and the current Asia/Shanghai timestamp. The PNG is compacted to fit the
+existing UDP reply limit; Telegram receives the combined image. Without the
+background, the original QR with a 10-pixel white border is returned.
+`background.png` is ignored by Git because it contains membership details.
+WeChat can stay running in the background.
 
 Every QR request obtains a fresh WeChat login code and new Costco credentials,
 saved privately in `state/costco_session.json`. Existing sessions or HAR captures

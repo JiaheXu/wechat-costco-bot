@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch, Mock
 from urllib.parse import parse_qs, urlsplit
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 import fetch_qr
 
@@ -16,6 +16,31 @@ PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4
 
 
 class FetchQRTest(unittest.TestCase):
+    def test_background_card_preserves_layout_and_places_qr_and_timestamp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            background = Image.new('RGB', (472, 922), 'white')
+            background.paste('blue', (0, 0, 472, 269))
+            background.save(root / 'background.png')
+            qr = Image.new('RGB', (21, 21), 'black')
+            qr.paste('white', (7, 7, 14, 14))
+            buffer = io.BytesIO()
+            qr.save(buffer, format='PNG')
+            with patch('fetch_qr.ROOT', root), \
+                 patch('fetch_qr.load_session', return_value=(root / 'state/session.json', '12345678901', {})), \
+                 patch('refresh_session.renew_session'), \
+                 patch('fetch_qr.download_qr', return_value=buffer.getvalue()):
+                output = fetch_qr.fetch_and_save()
+            with Image.open(output) as saved:
+                card = saved.convert('RGB')
+            self.assertEqual(card.size, (472, 922))
+            self.assertEqual(card.crop((0, 0, 472, 269)).tobytes(), background.crop((0, 0, 472, 269)).tobytes())
+            expected = ImageOps.contain(ImageOps.expand(qr, border=10, fill='white'),
+                                        (228, 228), Image.Resampling.NEAREST)
+            self.assertEqual(card.crop((122, 510, 350, 738)).tobytes(), expected.tobytes())
+            self.assertEqual(card.getpixel((112, 500)), (255, 255, 255))
+            self.assertNotEqual(card.crop((100, 752, 372, 795)).getextrema(), ((255, 255),) * 3)
+
     def test_no_capture_bootstraps_a_private_session(self):
         import costco_session
 

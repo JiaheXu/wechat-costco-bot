@@ -13,8 +13,9 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import build_opener, ProxyHandler, Request
+from zoneinfo import ZoneInfo
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 import costco_session
 from costco_session import NoRedirect, QRFetchError
 
@@ -89,6 +90,34 @@ def download_qr(card, headers):
     return image
 
 
+def render_qr(qr):
+    qr = ImageOps.expand(qr.convert('RGB'), border=10, fill='white')
+    background = ROOT / 'background.png'
+    if not background.is_file():
+        return qr
+    with Image.open(background) as source:
+        card = source.convert('RGB').resize((472, 922), Image.Resampling.LANCZOS)
+    # Flatten template background noise so the PNG fits in a UDP reply.
+    red, green, blue = card.split()
+    white = ImageChops.darker(ImageChops.darker(red, green), blue).point(lambda v: 255 if v >= 235 else 0)
+    card.paste('white', mask=white)
+    header = card.crop((0, 0, 472, 269))
+    color = header.getpixel((5, 30))
+    red, green, blue = ImageChops.difference(header, Image.new('RGB', header.size, color)).split()
+    flat = ImageChops.lighter(ImageChops.lighter(red, green), blue).point(lambda v: 255 if v <= 45 else 0)
+    header.paste(color, mask=flat)
+    card.paste(header)
+    draw = ImageDraw.Draw(card)
+    draw.rectangle((112, 500, 360, 798), fill='white')
+    qr = ImageOps.contain(qr, (228, 228), Image.Resampling.NEAREST)
+    card.paste(qr, (122 + (228 - qr.width) // 2, 510 + (228 - qr.height) // 2))
+    font = ImageFont.truetype('DejaVuSans.ttf', 20)
+    stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y.%m.%d %H:%M:%S')
+    draw.text((236, 773), stamp, fill='black', font=font, anchor='mm')
+    # Keep the card within the existing 60 KB base64 UDP reply limit.
+    return card.quantize(colors=96, dither=Image.Dither.NONE)
+
+
 def fetch_and_save():
     from refresh_session import renew_session
 
@@ -109,7 +138,7 @@ def fetch_and_save():
     try:
         with os.fdopen(fd, 'wb') as stream:
             with Image.open(BytesIO(image)) as qr:
-                ImageOps.expand(qr.convert('RGB'), border=10, fill='white').save(stream, format='PNG')
+                render_qr(qr).save(stream, format='PNG', optimize=True)
     except BaseException:
         output.unlink(missing_ok=True)
         raise

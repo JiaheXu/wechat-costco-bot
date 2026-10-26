@@ -7,4 +7,5 @@ __pycache__/
 images/
 logs/
 state/
+background.png
 .tools/
