@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 from pathlib import Path
 import socket
@@ -6,13 +7,47 @@ import socketserver
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlsplit
 
+import fetch_qr
 import qr_server
+from costco_session import LOGIN_PATH
 from fetch_qr import QRFetchError
 
 
 PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+
+
+class QRStartupTest(unittest.TestCase):
+    def test_startup_fetch_logs_result_and_keeps_serving(self):
+        cases = [
+            (None, 'Startup QR check succeeded'),
+            (QRFetchError('Costco rejected the request (code=501)'), 'code=501'),
+            (RuntimeError('private-token-and-card'), 'RuntimeError'),
+        ]
+        for error, expected in cases:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                image = Path(directory) / 'qr.png'
+                with patch('qr_server.ROOT', Path(directory)), \
+                     patch('qr_server.os.umask'), \
+                     patch('qr_server.logging.basicConfig'), \
+                     patch('qr_server.RotatingFileHandler'), \
+                     patch('qr_server.fetch_and_save', return_value=image, side_effect=error) as fetch, \
+                     patch('qr_server.socketserver.ThreadingUDPServer') as server, \
+                     self.assertLogs('qr_server', level='INFO') as logs:
+                    listener = server.return_value.__enter__.return_value
+
+                    def serve():
+                        fetch.assert_called_once_with()
+                        raise KeyboardInterrupt
+
+                    listener.serve_forever.side_effect = serve
+                    self.assertEqual(qr_server.main(), 0)
+                    listener.serve_forever.assert_called_once_with()
+                output = '\n'.join(logs.output)
+                self.assertIn(expected, output)
+                self.assertNotIn('private-token-and-card', output)
 
 
 class QRServerTest(unittest.TestCase):
@@ -53,6 +88,42 @@ class QRServerTest(unittest.TestCase):
         response = self.send({'type': 'costco_qr', 'request_id': 'b' * 32})
         self.assertTrue(response['ok'])
         self.assertEqual(self.fetch.call_count, 2)
+
+    def test_udp_requests_create_distinct_sessions_before_fetching_qr(self):
+        events = []
+        opener = Mock()
+
+        def upstream(request, timeout):
+            url = urlsplit(request.full_url)
+            if url.path == LOGIN_PATH:
+                code = parse_qs(url.query)['code'][0]
+                self.assertNotIn('Cookie', request.headers)
+                self.assertNotIn('Costco-authorization', request.headers)
+                events.append(('login', code))
+                body = {'code': 0, 'data': {'token': 'token-' + code,
+                        'sessionId': 'session-' + code, 'memberInfo': {'cardNo': '12345678901'}}}
+            else:
+                self.assertEqual(url.path, urlsplit(fetch_qr.ENDPOINT).path)
+                code = events[-1][1]
+                self.assertEqual(request.get_header('Costco-authorization'), 'token-' + code)
+                self.assertEqual(request.get_header('Cookie'), 'JSESSIONID=session-' + code)
+                events.append(('qr', code))
+                body = {'code': 0, 'data': 'data:image/png;base64,' + base64.b64encode(PNG).decode()}
+            return io.BytesIO(json.dumps(body).encode())
+
+        opener.open.side_effect = upstream
+        with patch('qr_server.fetch_and_save', wraps=fetch_qr.fetch_and_save), \
+             patch('fetch_qr.ROOT', Path(self.temp.name)), \
+             patch('refresh_session.get_login_code', side_effect=['first', 'second']), \
+             patch('refresh_session.build_opener', return_value=opener), \
+             patch('fetch_qr.build_opener', return_value=opener):
+            for request_id in ('a' * 32, 'b' * 32):
+                reply = self.send({'type': 'costco_qr', 'request_id': request_id})
+                self.assertTrue(reply['ok'], reply)
+                self.assertEqual(reply['request_id'], request_id)
+                self.assertTrue(base64.b64decode(reply['image']).startswith(b'\x89PNG\r\n\x1a\n'))
+        self.assertEqual(events, [('login', 'first'), ('qr', 'first'), ('login', 'second'), ('qr', 'second')])
+        self.assertEqual(len(list((Path(self.temp.name) / 'images').glob('*.png'))), 2)
 
     def test_login_failure_is_returned_without_credentials(self):
         self.fetch.side_effect = QRFetchError('Costco rejected the request (code=501)')

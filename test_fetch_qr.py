@@ -16,6 +16,25 @@ PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4
 
 
 class FetchQRTest(unittest.TestCase):
+    def test_no_capture_bootstraps_a_private_session(self):
+        import costco_session
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def login(headers, path):
+                self.assertEqual(headers, {})
+                costco_session.save({'cardNo': '12345678901',
+                                     'headers': {'costco-authorization': 'new-token', 'cookie': 'JSESSIONID=new'}}, path)
+
+            with patch('fetch_qr.ROOT', root), \
+                 patch('refresh_session.renew_session', side_effect=login), \
+                 patch('fetch_qr.download_qr', return_value=PNG) as download:
+                image = fetch_qr.fetch_and_save()
+            self.assertTrue(image.is_file())
+            self.assertEqual(download.call_args.args, ('12345678901', {
+                'costco-authorization': 'new-token', 'cookie': 'JSESSIONID=new'}))
+            self.assertEqual((root / 'state/costco_session.json').stat().st_mode & 0o777, 0o600)
+
     def test_loads_latest_qr_session_and_skips_unrelated_captures(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -89,7 +108,7 @@ class FetchQRTest(unittest.TestCase):
         original.save(buffer, format='PNG')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch('fetch_qr.ROOT', root), patch('fetch_qr.load_session', return_value=(root / 'capture.har', '12345678901', {})), patch('fetch_qr.download_qr', return_value=buffer.getvalue()), patch('builtins.print'):
+            with patch('fetch_qr.ROOT', root), patch('fetch_qr.load_session', return_value=(root / 'capture.har', '12345678901', {})), patch('refresh_session.renew_session'), patch('fetch_qr.download_qr', return_value=buffer.getvalue()), patch('builtins.print'):
                 output = fetch_qr.fetch_and_save()
             image, = (root / 'images').glob('*.png')
             self.assertEqual(output, image)
@@ -100,43 +119,43 @@ class FetchQRTest(unittest.TestCase):
                     self.assertEqual(padded.crop(box).getextrema(), ((255, 255),) * 3)
             self.assertEqual(image.stat().st_mode & 0o777, 0o600)
 
-    def test_login_rejection_renews_session_and_retries_once(self):
-        old = {'costco-authorization': 'old-token'}
-        new = {'costco-authorization': 'new-token'}
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            sessions = [(root / 'old.har', '12345678901', old),
-                        (root / 'old.har', '12345678901', old),
-                        (root / 'state/costco_session.json', '12345678901', new)]
-            with patch('fetch_qr.ROOT', root), patch('fetch_qr.load_session', side_effect=sessions), patch('fetch_qr.download_qr', side_effect=[fetch_qr.QRFetchError('Rejected', code=501), PNG]) as download, patch('refresh_session.renew_session') as renew, patch('builtins.print'):
-                result = fetch_qr.fetch_and_save()
-            self.assertTrue(result.is_file())
-            renew.assert_called_once_with(old, root / 'state/costco_session.json')
-            self.assertEqual(download.call_args_list[1].args[1], new)
-
-    def test_session_updated_by_collector_does_not_need_debugger(self):
+    def test_each_fetch_logs_in_before_downloading_even_with_a_saved_session(self):
         old = {'costco-authorization': 'old-token'}
         new = {'costco-authorization': 'new-token'}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sessions = [(root / 'old.har', '12345678901', old),
                         (root / 'state/costco_session.json', '12345678901', new),
+                        (root / 'state/costco_session.json', '12345678901', new),
                         (root / 'state/costco_session.json', '12345678901', new)]
-            with patch('fetch_qr.ROOT', root), patch('fetch_qr.load_session', side_effect=sessions), patch('fetch_qr.download_qr', side_effect=[fetch_qr.QRFetchError('Rejected', code=501), PNG]), patch('refresh_session.renew_session') as renew, patch('builtins.print'):
-                self.assertTrue(fetch_qr.fetch_and_save().is_file())
-            renew.assert_not_called()
+            events = []
+            def login(headers, path):
+                self.assertTrue(fetch_qr._SESSION_RENEW_LOCK.locked())
+                events.append('login')
 
-    def test_retry_is_limited_to_one_after_renewal(self):
+            def download(card, headers):
+                self.assertTrue(fetch_qr._SESSION_RENEW_LOCK.locked())
+                self.assertEqual(headers, new)
+                events.append('qr')
+                return PNG
+
+            with patch('fetch_qr.ROOT', root), patch('fetch_qr.load_session', side_effect=sessions), \
+                 patch('refresh_session.renew_session', side_effect=login), \
+                 patch('fetch_qr.download_qr', side_effect=download):
+                self.assertTrue(fetch_qr.fetch_and_save().is_file())
+                self.assertTrue(fetch_qr.fetch_and_save().is_file())
+            self.assertEqual(events, ['login', 'qr', 'login', 'qr'])
+
+    def test_rejected_new_session_is_not_retried(self):
         old = {'costco-authorization': 'old-token'}
         new = {'costco-authorization': 'new-token'}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sessions = [(root / 'old.har', '12345678901', old),
-                        (root / 'old.har', '12345678901', old),
                         (root / 'state/costco_session.json', '12345678901', new)]
             with patch('fetch_qr.ROOT', root), patch('fetch_qr.load_session', side_effect=sessions), patch('fetch_qr.download_qr', side_effect=fetch_qr.QRFetchError('Rejected', code=501)) as download, patch('refresh_session.renew_session') as renew, patch('builtins.print'):
                 with self.assertRaises(fetch_qr.QRFetchError):
                     fetch_qr.fetch_and_save()
-            self.assertEqual(download.call_count, 2)
+            self.assertEqual(download.call_count, 1)
             renew.assert_called_once()
             self.assertFalse((root / 'images').exists())

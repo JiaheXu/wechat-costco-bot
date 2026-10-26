@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch a fresh Costco membership QR using a previously captured session."""
+"""Create a fresh Costco login session and fetch its membership QR."""
 
 import base64
 from datetime import datetime, timezone
@@ -90,20 +90,16 @@ def download_qr(card, headers):
 
 
 def fetch_and_save():
-    source, card, headers = load_session(ROOT / 'captures')
-    print(f'Using session: {source.relative_to(ROOT)}')
-    try:
-        image = download_qr(card, headers)
-    except QRFetchError as error:
-        if error.code != 501:
-            raise
-        from refresh_session import renew_session
+    from refresh_session import renew_session
 
-        with _SESSION_RENEW_LOCK:
-            _, current_card, current_headers = load_session(ROOT / 'captures')
-            if current_headers == headers and current_card == card:
-                renew_session(headers, ROOT / 'state/costco_session.json')
-            _, card, headers = load_session(ROOT / 'captures')
+    # A concurrent login could replace credentials before this QR is fetched.
+    with _SESSION_RENEW_LOCK:
+        try:
+            _, _, headers = load_session(ROOT / 'captures')
+        except QRFetchError:
+            headers = {}
+        renew_session(headers, ROOT / 'state/costco_session.json')
+        _, card, headers = load_session(ROOT / 'captures')
         image = download_qr(card, headers)
     directory = ROOT / 'images'
     directory.mkdir(mode=0o700, exist_ok=True)

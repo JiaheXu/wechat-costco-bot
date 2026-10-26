@@ -65,6 +65,14 @@ def main():
     )
     port = int(os.getenv('COSTCO_QR_SERVER_PORT', '18888'))
     with socketserver.ThreadingUDPServer(('127.0.0.1', port), QRHandler) as server:
+        logger.info('Startup QR check: fetching a fresh image.')
+        try:
+            image = fetch_and_save()
+            logger.info('Startup QR check succeeded; saved image: %s', image)
+        except QRFetchError as error:
+            logger.warning('Startup QR check failed: %s; continuing to serve requests.', error.safe_message)
+        except Exception as error:
+            logger.warning('Startup QR check failed: %s; continuing to serve requests.', type(error).__name__)
         logger.info('QR server listening on UDP 127.0.0.1:%s; Ctrl+C to stop.', port)
         try:
             server.serve_forever()

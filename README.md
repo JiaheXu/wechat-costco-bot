@@ -6,21 +6,21 @@ Fetch a fresh QR code directly from Costco and save it in `images/`:
 python3 fetch_qr.py
 ```
 
-The script uses Python and Pillow (already installed on this machine); no sudo,
-proxy, or mitmproxy process is needed for normal fetching. Each run requests a fresh QR
-using the latest saved session, then saves a uniquely named PNG under
+The script uses Python and Pillow (already installed on this machine); no proxy
+or mitmproxy process is needed for direct fetching. Starting the login bridge
+requires sudo if the login bridge needs starting. Each run creates a new Costco
+login session and requests a fresh QR, then saves a uniquely named PNG under
 `images/` beside the script. Image files have owner-only permissions and are
 excluded from Git. A 10-pixel white border is added on all four sides without
 resizing the QR: a 400×400 image becomes 420×420. Telegram sends this same padded
 image. WeChat can stay running in the background.
 
-Sessions collected from successful logins are saved privately in
-`state/costco_session.json` and used immediately, even while the collector is
-still running. The fetcher falls back to existing `flows.har` captures if no live
-session file exists. It never prints the membership number, cookies, or token.
-On application code `501`, it checks for an updated session, otherwise tries
-the local WeChat login bridge, saves the new credentials, and retries the QR
-once. Other errors do not trigger repeated login attempts.
+Every QR request obtains a fresh WeChat login code and new Costco credentials,
+saved privately in `state/costco_session.json`. Existing sessions or HAR captures
+only supply reusable request headers; their authorization and cookies are
+excluded from login requests. No capture is required. Failed login or QR calls
+are reported without repeated attempts. The fetcher never prints the membership
+number, cookies, or token.
 The QR's expected three-minute validity comes from the mini program behavior;
 the script does not independently verify its expiry or store acceptance.
 
@@ -41,7 +41,34 @@ Keep WeChat running. A normal login when reopening the Costco mini program is
 picked up immediately. Ctrl+C stops the collector and restores proxy settings.
 This collector observes logins; it does not itself make WeChat log in.
 
-For unattended renewal after `501`, start the local login bridge:
+The QR fetcher creates a new Costco session for every request, including the
+server's startup check, without waiting for the previous session to expire.
+It requests a fresh login code from your signed-in WeChat account using
+`wx.login()`, or the native `WeixinJSBridge` on Linux page targets where `wx`
+is unavailable. The native path attaches only to the exact Costco app path on
+`https://servicewechat.com`. It exchanges the code for the Costco token,
+session ID and membership number, and saves
+the credentials privately in `state/costco_session.json`.
+Costco may reuse `JSESSIONID` across logins; each request still obtains a fresh
+authorization token before fetching its QR.
+
+Start the QR server normally:
+
+```bash
+python3 qr_server.py
+```
+
+If login is needed and the bridge is unavailable, the code starts it for you.
+Keep WeChat running and approve the sudo prompt in the terminal. After the
+bridge reports attachment, close and reopen **only the Costco mini program**
+so it connects to the debugger, then keep it open. If the startup check runs
+before the mini program connects, send another QR request or restart the server.
+Existing bridge processes are reused. A bridge started by this process is
+stopped on normal exit when sudo authorization is still available; otherwise
+a warning asks you to stop it manually.
+
+Headless runs use cached sudo authorization and fail with an actionable error
+instead of waiting for a password. For a separately managed bridge, run:
 
 ```bash
 bash start_login_bridge.sh
@@ -65,8 +92,9 @@ This machine's WMPF runtime is **14910**, supported by the installed
 `9be0b2d0bd9875bd21a104a2279ad4304b46388b`. Its dependencies are installed in
 the ignored `.tools/WMPFDebugger` directory. The launcher restricts both
 debugging ports (`9421` and `62000`) to `127.0.0.1`. Node.js 22+ is required.
-The bridge CLI and code paths have been checked, but live attachment and
-unattended renewal still need testing after the privileged launcher is run.
+Live attachment, native page login, and QR retrieval have been verified with
+this runtime and an already running bridge. Automatic privileged bridge startup
+and cleanup still require verification in an interactive terminal.
 
 If the bridge directory is missing on another checkout, install it as your
 normal desktop user before running the launcher:
@@ -95,10 +123,9 @@ apart without overlapping requests. It saves each successful padded image in
 and keeps running after failures. Press **Ctrl+C** to stop.
 
 Logs appear in the terminal and `logs/qr_watch.log`, rotating at 1 MB with three
-backups. Credentials and raw server responses are not logged. The watcher loads
-the latest saved session on each attempt. It uses the same `501` renewal path
-when the login bridge is available; otherwise failures are logged until the
-session is refreshed. Saved images
+backups. Credentials and raw server responses are not logged. The watcher creates
+a new Costco session on every attempt using the same login bridge. Failures are
+logged and the next scheduled attempt tries again. Saved images
 accumulate until you remove them. This watcher does not send Telegram messages.
 
 ## Telegram Signal trigger
@@ -125,17 +152,22 @@ Run these two processes:
    ```
 
 Keep both processes running. Telegram sends a JSON UDP request to
-`127.0.0.1:18888`; the QR server fetches a fresh image using the latest captured
-session, saves the padded PNG in `images/`, and returns the image bytes encoded
+`127.0.0.1:18888`; the QR server creates a new Costco session, fetches a fresh
+image, saves the padded PNG in `images/`, and returns the image bytes encoded
 in base64 with a matching request ID. Telegram uploads that image to Signal.
 The Telegram process no longer imports this repository or reads its image and
 session files. Costco credentials remain in the fetch server's process.
 
+On startup, the QR server fetches and saves one fresh QR image and logs whether
+the check succeeded. If it fails, the server logs a safe error and continues
+listening so later requests can succeed after the session is refreshed.
+
 The port can be changed with `COSTCO_QR_SERVER_PORT` in both processes. The server
 binds only to loopback; this setup expects both nodes on the same Ubuntu host.
 The client waits up to 90 seconds and reports missing-server or fetch errors.
-Requests can be served concurrently, and every request fetches again without
-using a cached QR. The watcher is an optional diagnostic tool and does not need
+Login and QR retrieval are serialized within the server so concurrent requests
+cannot replace each other's credentials. Every request logs in and fetches again
+without using a cached QR. The watcher is an optional diagnostic tool and does not need
 to run alongside these two processes.
 
 Server logs go to the terminal and `logs/qr_server.log`, rotating at 1 MB with
